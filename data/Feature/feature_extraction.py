@@ -11,7 +11,6 @@ from tqdm import tqdm
 pretrained_dir = "../../pretrained_models"
 
 def check_model_files(model_dir, required_files):
-    """检查模型文件是否完整"""
     missing_files = []
     for file in required_files:
         if not os.path.exists(os.path.join(model_dir, file)):
@@ -20,7 +19,6 @@ def check_model_files(model_dir, required_files):
 
 class IEMOCAPFeatureExtractor:
     def __init__(self):
-        # 检查音频模型文件
         wav2vec2_files = [
             'config.json',
             'pytorch_model.bin',
@@ -33,7 +31,6 @@ class IEMOCAPFeatureExtractor:
         if missing_wav2vec2:
             raise FileNotFoundError(f"Wav2Vec2模型缺少以下文件: {missing_wav2vec2}")
 
-        # 检查BERT模型文件
         bert_files = [
             'config.json',
             'pytorch_model.bin',
@@ -46,35 +43,25 @@ class IEMOCAPFeatureExtractor:
         if missing_bert:
             raise FileNotFoundError(f"BERT模型缺少以下文件: {missing_bert}")
 
-        try:
-            # 初始化音频模型
-            self.audio_model = Wav2Vec2Model.from_pretrained(wav2vec2_dir, local_files_only=True)
-            self.audio_processor = Wav2Vec2Processor.from_pretrained(wav2vec2_dir, local_files_only=True)
+
+        self.audio_model = Wav2Vec2Model.from_pretrained(wav2vec2_dir, local_files_only=True)
+        self.audio_processor = Wav2Vec2Processor.from_pretrained(wav2vec2_dir, local_files_only=True)
             
-            # 初始化文本模型
-            self.text_model = BertModel.from_pretrained(bert_dir, local_files_only=True)
-            self.text_tokenizer = BertTokenizer.from_pretrained(bert_dir, local_files_only=True)
-            
-            # 确保模型权重正确加载
-            if not os.path.exists(os.path.join(bert_dir, 'pytorch_model.bin')):
-                raise FileNotFoundError("BERT模型权重文件未找到")
+        self.text_model = BertModel.from_pretrained(bert_dir, local_files_only=True)
+        self.text_tokenizer = BertTokenizer.from_pretrained(bert_dir, local_files_only=True)
+
+        if not os.path.exists(os.path.join(bert_dir, 'pytorch_model.bin')):
+            raise FileNotFoundError("BERT模型权重文件未找到")
                 
-        except Exception as e:
-            print("模型加载失败，请检查模型文件是否完整")
-            print("错误信息:", str(e))
-            raise
-        
-        # 设置设备
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.audio_model.to(self.device)
         self.text_model.to(self.device)
         
-        # 设置为评估模式
         self.audio_model.eval()
         self.text_model.eval()
         
     def parse_emotion_file(self, file_path):
-        """解析情感标注文件，只保留ang、hap、neu、sad四种情绪"""
+        """只保留ang、hap、neu、sad四种"""
         segments = []
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -150,21 +137,14 @@ class IEMOCAPFeatureExtractor:
     
     def extract_audio_features(self, audio_path, start_time, end_time):
         """提取指定时间段的音频特征"""
-        # 加载音频文件
         audio, sr = librosa.load(audio_path, sr=16000)
-        
-        # 计算时间段的采样点
         start_sample = int(start_time * sr)
         end_sample = int(end_time * sr)
-        
-        # 提取指定时间段的音频
+
         segment = audio[start_sample:end_sample]
-        
-        # 准备输入
+
         inputs = self.audio_processor(segment, sampling_rate=sr, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
-        # 提取特征
         with torch.no_grad():
             outputs = self.audio_model(**inputs)
             features = outputs.last_hidden_state.mean(dim=1)  # 平均池化
@@ -173,18 +153,14 @@ class IEMOCAPFeatureExtractor:
     
     def extract_text_features(self, text):
         """提取文本特征"""
-        # 准备输入
         inputs = self.text_tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
         # 提取特征
         with torch.no_grad():
             outputs = self.text_model(**inputs)
-            # 使用[CLS]标记的输出作为整个句子的表示
             cls_output = outputs.last_hidden_state[:, 0, :]
-            # 同时保留平均池化的特征
             mean_output = outputs.last_hidden_state.mean(dim=1)
-            # 将两种特征拼接
             features = torch.cat([cls_output, mean_output], dim=1)
             
         return features.cpu().numpy()
@@ -265,7 +241,6 @@ class IEMOCAPFeatureExtractor:
                     if file.endswith('.txt'):
                         dialogue_files.append(file.replace('.txt', ''))
             
-            # 使用tqdm显示进度
             for dialogue in tqdm(dialogue_files, desc="处理对话文件"):
                 emotion_file = os.path.join(dialog_path, 'EmoEvaluation', f"{dialogue}.txt")
                 if os.path.exists(emotion_file):
@@ -324,45 +299,26 @@ class IEMOCAPFeatureExtractor:
         return features
 
 def main():
-    # 初始化特征提取器
+
     extractor = IEMOCAPFeatureExtractor()
     
-    # IEMOCAP数据集根目录
     dataset_root = "data/IEMOCAP"
-    print(f"数据集根目录: {dataset_root}")
+
     
-    # 检查数据集目录是否存在
-    if not os.path.exists(dataset_root):
-        print(f"错误: 数据集目录 {dataset_root} 不存在")
-        return
-    
-    # 列出数据集目录内容
-    print("\n数据集目录内容:")
+    print("\n目录:")
     for item in os.listdir(dataset_root):
         print(f"- {item}")
     
-    # 创建保存特征的目录
     features_dir = "data/Feature/features"
     os.makedirs(features_dir, exist_ok=True)
     print(f"\n特征保存目录: {features_dir}")
     
-    # 处理所有会话
     for session in tqdm(os.listdir(dataset_root)):
         session_path = os.path.join(dataset_root, session)
         # 只处理Session开头的目录，跳过Documentation
         if os.path.isdir(session_path) and session.startswith('Session'):
             print(f"\n处理会话: {session}")
             print(f"会话路径: {session_path}")
-            
-            # 检查会话目录结构
-            print("\n会话目录结构:")
-            for root, dirs, files in os.walk(session_path):
-                level = root.replace(session_path, '').count(os.sep)
-                indent = ' ' * 4 * level
-                print(f"{indent}{os.path.basename(root)}/")
-                subindent = ' ' * 4 * (level + 1)
-                for f in files:
-                    print(f"{subindent}{f}")
             
             features = extractor.process_session(session_path)
             

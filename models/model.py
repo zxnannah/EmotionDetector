@@ -72,8 +72,50 @@ class SharedAutoencoder(nn.Module):
         else:
             raise ValueError("Unsupported modality")
 
+class AudioEncoder(nn.Module):
+    """音频特征编码器"""
+    def __init__(self, input_dim=768, hidden_dim=256):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+    
+    def forward(self, x):
+        return self.encoder(x)
+
+class TextEncoder(nn.Module):
+    """文本特征编码器"""
+    def __init__(self, input_dim=768, hidden_dim=256):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+    
+    def forward(self, x):
+        return self.encoder(x)
+
+class MotionEncoder(nn.Module):
+    """动作特征编码器"""
+    def __init__(self, input_dim=24, hidden_dim=256):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+    
+    def forward(self, x):
+        return self.encoder(x)
+
 class EmotionClassifier(nn.Module):
-    def __init__(self, hidden_dim=256, num_classes=4):  # 修改为4个情感类别
+    def __init__(self, hidden_dim=256, num_classes=4):
         super(EmotionClassifier, self).__init__()
         self.audio_encoder = AudioEncoder()
         self.text_encoder = TextEncoder()
@@ -102,10 +144,10 @@ class EmotionClassifier(nn.Module):
         motion_encoded = self.motion_encoder(motion_features)
         
         # 特征融合
+        """此处只验证特征对齐效果，暂不修改融合算法"""
         combined = torch.cat([audio_encoded, text_encoded, motion_encoded], dim=1)
         fused = self.fusion(combined)
         
-        # 预测情感类别和VAD值
         emotion_logits = self.classifier(fused)
         vad_values = self.vad_predictor(fused)
         
@@ -115,7 +157,7 @@ class EmotionDataset(torch.utils.data.Dataset):
     def __init__(self, features_dir):
         self.features_dir = features_dir
         self.sessions = [d for d in os.listdir(features_dir) if os.path.isdir(os.path.join(features_dir, d))]
-        self.emotion_to_idx = {'ang': 0, 'hap': 1, 'neu': 2, 'sad': 3}  # 添加情绪到索引的映射
+        self.emotion_to_idx = {'ang': 0, 'hap': 1, 'neu': 2, 'sad': 3} 
         
     def __len__(self):
         return len(self.sessions)
@@ -147,10 +189,6 @@ class EmotionPerceptionModel(nn.Module):
     def __init__(self):
         super().__init__()
         
-        # 模态编码器
-        self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
-        self.text_encoder = BertModel.from_pretrained("bert-base-uncased")
-        
         # 共享组件
         self.shared_mlp = SharedMLP()
         self.mim_module = VariationalMIM()
@@ -166,17 +204,12 @@ class EmotionPerceptionModel(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(256, 3)  # VAD三个维度
         )
-        
+    
     def encode_audio(self, audio_input):
-        with torch.no_grad():
-            features = self.audio_encoder(**audio_input).last_hidden_state
-            features = features.mean(dim=1)  # 平均池化
-        return self.shared_mlp(features)
+        return self.shared_mlp(audio_input)
     
     def encode_text(self, text_input):
-        with torch.no_grad():
-            features = self.text_encoder(**text_input).last_hidden_state[:, 0, :]
-        return self.shared_mlp(features)
+        return self.shared_mlp(text_input)
     
     def encode_motion(self, motion_input):
         return self.shared_mlp(motion_input)
@@ -185,9 +218,9 @@ class EmotionPerceptionModel(nn.Module):
         """完整前向传播
         Args:
             batch: 包含多模态输入的字典
-                - 'audio': 音频输入
-                - 'text': 文本输入
-                - 'motion': 头部动作特征
+                - 'audio': 音频特征
+                - 'text': 文本特征
+                - 'motion': 动作特征
                 - 'emotion': 情绪标签
                 - 'vad': VAD值
         Returns:
@@ -195,64 +228,55 @@ class EmotionPerceptionModel(nn.Module):
         """
         outputs = {}
         
-        # 特征提取与投影
-        if 'audio' in batch:
-            audio_feat = self.encode_audio(batch['audio'])
-            outputs['audio_features'] = audio_feat
-        if 'text' in batch:
-            text_feat = self.encode_text(batch['text'])
-            outputs['text_features'] = text_feat
-        if 'motion' in batch:
-            motion_feat = self.encode_motion(batch['motion'])
-            outputs['motion_features'] = motion_feat
+        # 特征投影
+        audio_feat = self.encode_audio(batch['audio'])
+        text_feat = self.encode_text(batch['text'])
+        motion_feat = self.encode_motion(batch['motion'])
+        
+        outputs['audio_features'] = audio_feat
+        outputs['text_features'] = text_feat
+        outputs['motion_features'] = motion_feat
             
         # 互信息计算
         mim_loss = 0
-        if 'audio' in batch and 'text' in batch:
-            mim_loss += self.mim_module(audio_feat, text_feat)
-        if 'audio' in batch and 'motion' in batch:
-            mim_loss += self.mim_module(audio_feat, motion_feat)
-        if 'text' in batch and 'motion' in batch:
-            mim_loss += self.mim_module(text_feat, motion_feat)
+        mim_loss += self.mim_module(audio_feat, text_feat)
+        mim_loss += self.mim_module(audio_feat, motion_feat)
+        mim_loss += self.mim_module(text_feat, motion_feat)
         outputs['mim_loss'] = mim_loss / 3  # 平均跨模态损失
         
         # 自编码器重建
         recon_loss = 0
-        if 'audio' in batch:
-            recon_audio = self.autoencoder(audio_feat, 'audio')
-            outputs['recon_audio'] = recon_audio
-            recon_loss += F.mse_loss(recon_audio, batch['audio'].last_hidden_state.mean(dim=1))
+        recon_audio = self.autoencoder(audio_feat, 'audio')
+        outputs['recon_audio'] = recon_audio
+        recon_loss += F.mse_loss(recon_audio, batch['audio'])
             
-        if 'text' in batch:
-            recon_text = self.autoencoder(text_feat, 'text')
-            outputs['recon_text'] = recon_text
-            recon_loss += F.mse_loss(recon_text, batch['text'].last_hidden_state[:, 0, :])
+        recon_text = self.autoencoder(text_feat, 'text')
+        outputs['recon_text'] = recon_text
+        recon_loss += F.mse_loss(recon_text, batch['text'])
             
-        if 'motion' in batch:
-            recon_motion = self.autoencoder(motion_feat, 'motion')
-            outputs['recon_motion'] = recon_motion
-            recon_loss += F.mse_loss(recon_motion, batch['motion'])
+        recon_motion = self.autoencoder(motion_feat, 'motion')
+        outputs['recon_motion'] = recon_motion
+        recon_loss += F.mse_loss(recon_motion, batch['motion'])
             
         outputs['recon_loss'] = recon_loss
         
         # 情绪分类和VAD回归
-        if 'audio' in batch and 'text' in batch and 'motion' in batch:
-            # 融合特征
-            fused_feature = (audio_feat + text_feat + motion_feat) / 3
-            
-            # 情绪分类
-            emotion_logits, vad_values = self.emotion_classifier(fused_feature, fused_feature, fused_feature)
-            outputs['emotion_logits'] = emotion_logits
-            if 'emotion' in batch:
-                emotion_loss = F.cross_entropy(emotion_logits, batch['emotion'])
-                outputs['emotion_loss'] = emotion_loss
-            
-            # VAD回归
-            vad_pred = self.vad_regressor(fused_feature)
-            outputs['vad_pred'] = vad_pred
-            if 'vad' in batch:
-                vad_loss = F.mse_loss(vad_pred, batch['vad'])
-                outputs['vad_loss'] = vad_loss
+        # 融合特征
+        fused_feature = (audio_feat + text_feat + motion_feat) / 3
+        
+        # 情绪分类
+        emotion_logits, vad_values = self.emotion_classifier(fused_feature, fused_feature, fused_feature)
+        outputs['emotion_logits'] = emotion_logits
+        if 'emotion' in batch:
+            emotion_loss = F.cross_entropy(emotion_logits, batch['emotion'])
+            outputs['emotion_loss'] = emotion_loss
+        
+        # VAD回归
+        vad_pred = self.vad_regressor(fused_feature)
+        outputs['vad_pred'] = vad_pred
+        if 'vad' in batch:
+            vad_loss = F.mse_loss(vad_pred, batch['vad'])
+            outputs['vad_loss'] = vad_loss
         
         # 总损失
         total_loss = (
@@ -265,19 +289,12 @@ class EmotionPerceptionModel(nn.Module):
         
         return outputs
 
-# 使用示例
 if __name__ == '__main__':
     model = EmotionPerceptionModel()
     
-    # 模拟输入
     batch = {
-        'audio': {
-            'input_values': torch.randn(2, 16000),
-            'attention_mask': torch.ones(2, 16000)
-        },
-        'text': {
-            'input_ids': torch.randint(0, 30522, (2, 128))
-        },
+        'audio': torch.randn(2, 768),
+        'text': torch.randn(2, 768),
         'motion': torch.randn(2, 24)
     }
     
