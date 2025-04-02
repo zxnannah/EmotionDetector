@@ -72,6 +72,76 @@ class SharedAutoencoder(nn.Module):
         else:
             raise ValueError("Unsupported modality")
 
+class EmotionClassifier(nn.Module):
+    def __init__(self, hidden_dim=256, num_classes=4):  # 修改为4个情感类别
+        super(EmotionClassifier, self).__init__()
+        self.audio_encoder = AudioEncoder()
+        self.text_encoder = TextEncoder()
+        self.motion_encoder = MotionEncoder()
+        
+        # 多模态融合
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+        
+        # 情感分类器
+        self.classifier = nn.Linear(hidden_dim, num_classes)
+        
+        # VAD预测器
+        self.vad_predictor = nn.Linear(hidden_dim, 3)  # 3个VAD值
+        
+    def forward(self, audio_features, text_features, motion_features):
+        # 编码各个模态
+        audio_encoded = self.audio_encoder(audio_features)
+        text_encoded = self.text_encoder(text_features)
+        motion_encoded = self.motion_encoder(motion_features)
+        
+        # 特征融合
+        combined = torch.cat([audio_encoded, text_encoded, motion_encoded], dim=1)
+        fused = self.fusion(combined)
+        
+        # 预测情感类别和VAD值
+        emotion_logits = self.classifier(fused)
+        vad_values = self.vad_predictor(fused)
+        
+        return emotion_logits, vad_values
+
+class EmotionDataset(torch.utils.data.Dataset):
+    def __init__(self, features_dir):
+        self.features_dir = features_dir
+        self.sessions = [d for d in os.listdir(features_dir) if os.path.isdir(os.path.join(features_dir, d))]
+        self.emotion_to_idx = {'ang': 0, 'hap': 1, 'neu': 2, 'sad': 3}  # 添加情绪到索引的映射
+        
+    def __len__(self):
+        return len(self.sessions)
+    
+    def __getitem__(self, idx):
+        session = self.sessions[idx]
+        session_path = os.path.join(self.features_dir, session)
+        
+        # 加载特征
+        audio_features = torch.FloatTensor(np.load(os.path.join(session_path, 'audio_features.npy')))
+        text_features = torch.FloatTensor(np.load(os.path.join(session_path, 'text_features.npy')))
+        motion_features = torch.FloatTensor(np.load(os.path.join(session_path, 'motion_features.npy')))
+        emotion_labels = np.load(os.path.join(session_path, 'emotion_labels.npy'))
+        vad_values = torch.FloatTensor(np.load(os.path.join(session_path, 'vad_values.npy')))
+        
+        # 将情绪标签转换为索引
+        emotion_indices = torch.LongTensor([self.emotion_to_idx[emotion] for emotion in emotion_labels])
+        
+        return {
+            'audio': audio_features,
+            'text': text_features,
+            'motion': motion_features,
+            'emotion': emotion_indices,
+            'vad': vad_values
+        }
+
 class EmotionPerceptionModel(nn.Module):
     """情绪感知多模态模型"""
     def __init__(self):
@@ -87,12 +157,7 @@ class EmotionPerceptionModel(nn.Module):
         self.autoencoder = SharedAutoencoder()
         
         # 情绪分类头
-        self.emotion_classifier = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 6)  # 6种情绪类别
-        )
+        self.emotion_classifier = EmotionClassifier()
         
         # VAD回归头
         self.vad_regressor = nn.Sequential(
@@ -176,7 +241,7 @@ class EmotionPerceptionModel(nn.Module):
             fused_feature = (audio_feat + text_feat + motion_feat) / 3
             
             # 情绪分类
-            emotion_logits = self.emotion_classifier(fused_feature)
+            emotion_logits, vad_values = self.emotion_classifier(fused_feature, fused_feature, fused_feature)
             outputs['emotion_logits'] = emotion_logits
             if 'emotion' in batch:
                 emotion_loss = F.cross_entropy(emotion_logits, batch['emotion'])

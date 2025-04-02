@@ -26,7 +26,7 @@ class IEMOCAPFeatureExtractor:
         self.text_model.eval()
         
     def parse_emotion_file(self, emotion_file):
-        """解析情感标注文件"""
+        """解析情感标注文件，只保留ang、hap、neu、sad四种情绪"""
         segments = []
         with open(emotion_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -46,14 +46,16 @@ class IEMOCAPFeatureExtractor:
                     emotion = parts[2]
                     vad = eval(parts[3])  # 解析VAD值
                     
-                    current_segment = {
-                        'start_time': start_time,
-                        'end_time': end_time,
-                        'turn_name': turn_name,
-                        'emotion': emotion,
-                        'vad': vad
-                    }
-                    segments.append(current_segment)
+                    # 只保留四种情绪
+                    if emotion in ['ang', 'hap', 'neu', 'sad']:
+                        current_segment = {
+                            'start_time': start_time,
+                            'end_time': end_time,
+                            'turn_name': turn_name,
+                            'emotion': emotion,
+                            'vad': vad
+                        }
+                        segments.append(current_segment)
         
         return segments
     
@@ -167,7 +169,7 @@ class IEMOCAPFeatureExtractor:
         return feature_vector
     
     def process_session(self, session_path):
-        """处理单个会话的所有特征"""
+        """处理单个会话的所有特征，只保留四种情绪的数据"""
         features = {
             'audio': [],
             'text': [],
@@ -198,35 +200,37 @@ class IEMOCAPFeatureExtractor:
                     transcript_segments = self.parse_transcript_file(transcript_file)
                 
                 for segment in segments:
-                    # 提取音频特征
-                    audio_path = os.path.join(dialog_path, 'wav', f"{dialogue}.wav")
-                    if os.path.exists(audio_path):
-                        audio_features = self.extract_audio_features(
-                            audio_path, 
-                            segment['start_time'], 
-                            segment['end_time']
-                        )
-                        features['audio'].append(audio_features)
-                    
-                    # 提取文本特征
-                    if os.path.exists(transcript_file) and segment['turn_name'] in transcript_segments:
-                        text = transcript_segments[segment['turn_name']]
-                        text_features = self.extract_text_features(text)
-                        features['text'].append(text_features)
-                    
-                    # 提取头部动作特征
-                    motion_path = os.path.join(dialog_path, 'MOCAP_head', f"{dialogue}.txt")
-                    if os.path.exists(motion_path):
-                        motion_features = self.extract_motion_features(
-                            motion_path,
-                            segment['start_time'],
-                            segment['end_time']
-                        )
-                        features['motion'].append(motion_features)
-                    
-                    # 保存情感标签和VAD值
-                    features['emotion'].append(segment['emotion'])
-                    features['vad'].append(segment['vad'])
+                    # 只处理四种情绪的数据
+                    if segment['emotion'] in ['ang', 'hap', 'neu', 'sad']:
+                        # 提取音频特征
+                        audio_path = os.path.join(dialog_path, 'wav', f"{dialogue}.wav")
+                        if os.path.exists(audio_path):
+                            audio_features = self.extract_audio_features(
+                                audio_path, 
+                                segment['start_time'], 
+                                segment['end_time']
+                            )
+                            features['audio'].append(audio_features)
+                        
+                        # 提取文本特征
+                        if os.path.exists(transcript_file) and segment['turn_name'] in transcript_segments:
+                            text = transcript_segments[segment['turn_name']]
+                            text_features = self.extract_text_features(text)
+                            features['text'].append(text_features)
+                        
+                        # 提取头部动作特征
+                        motion_path = os.path.join(dialog_path, 'MOCAP_head', f"{dialogue}.txt")
+                        if os.path.exists(motion_path):
+                            motion_features = self.extract_motion_features(
+                                motion_path,
+                                segment['start_time'],
+                                segment['end_time']
+                            )
+                            features['motion'].append(motion_features)
+                        
+                        # 保存情感标签和VAD值
+                        features['emotion'].append(segment['emotion'])
+                        features['vad'].append(segment['vad'])
         
         return features
 
