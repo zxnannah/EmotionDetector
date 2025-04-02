@@ -1,21 +1,68 @@
 import os
 import torch
 import numpy as np
-from transformers import Wav2Vec2Model, Wav2Vec2Tokenizer, BertModel, BertTokenizer
+from transformers import Wav2Vec2Model, Wav2Vec2Processor, BertModel, BertTokenizer
 from torch.utils.data import Dataset, DataLoader
 import librosa
 import pandas as pd
 from tqdm import tqdm
 
+
+pretrained_dir = "../../pretrained_models"
+
+def check_model_files(model_dir, required_files):
+    """检查模型文件是否完整"""
+    missing_files = []
+    for file in required_files:
+        if not os.path.exists(os.path.join(model_dir, file)):
+            missing_files.append(file)
+    return missing_files
+
 class IEMOCAPFeatureExtractor:
     def __init__(self):
-        # 初始化音频模型
-        self.audio_model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base")
-        self.audio_tokenizer = Wav2Vec2Tokenizer.from_pretrained("facebook/wav2vec2-base")
-        
-        # 初始化文本模型
-        self.text_model = BertModel.from_pretrained("bert-base-uncased")
-        self.text_tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        # 检查音频模型文件
+        wav2vec2_files = [
+            'config.json',
+            'pytorch_model.bin',
+            'preprocessor_config.json',
+            'tokenizer_config.json',
+            'vocab.json'
+        ]
+        wav2vec2_dir = os.path.join(pretrained_dir, 'facebook', 'wav2vec2-base')
+        missing_wav2vec2 = check_model_files(wav2vec2_dir, wav2vec2_files)
+        if missing_wav2vec2:
+            raise FileNotFoundError(f"Wav2Vec2模型缺少以下文件: {missing_wav2vec2}")
+
+        # 检查BERT模型文件
+        bert_files = [
+            'config.json',
+            'pytorch_model.bin',
+            'tokenizer_config.json',
+            'vocab.txt',
+            'tokenizer.json'
+        ]
+        bert_dir = os.path.join(pretrained_dir, 'bert-base-uncased')
+        missing_bert = check_model_files(bert_dir, bert_files)
+        if missing_bert:
+            raise FileNotFoundError(f"BERT模型缺少以下文件: {missing_bert}")
+
+        try:
+            # 初始化音频模型
+            self.audio_model = Wav2Vec2Model.from_pretrained(wav2vec2_dir, local_files_only=True)
+            self.audio_processor = Wav2Vec2Processor.from_pretrained(wav2vec2_dir, local_files_only=True)
+            
+            # 初始化文本模型
+            self.text_model = BertModel.from_pretrained(bert_dir, local_files_only=True)
+            self.text_tokenizer = BertTokenizer.from_pretrained(bert_dir, local_files_only=True)
+            
+            # 确保模型权重正确加载
+            if not os.path.exists(os.path.join(bert_dir, 'pytorch_model.bin')):
+                raise FileNotFoundError("BERT模型权重文件未找到")
+                
+        except Exception as e:
+            print("模型加载失败，请检查模型文件是否完整")
+            print("错误信息:", str(e))
+            raise
         
         # 设置设备
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,69 +70,82 @@ class IEMOCAPFeatureExtractor:
         self.text_model.to(self.device)
         
         # 设置为评估模式
+        self.audio_model.eval()
         self.text_model.eval()
         
-    def parse_emotion_file(self, emotion_file):
+    def parse_emotion_file(self, file_path):
         """解析情感标注文件，只保留ang、hap、neu、sad四种情绪"""
         segments = []
-        with open(emotion_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            current_segment = {}
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line or line.startswith('%') or line.startswith('C-') or line.startswith('A-'):
+                        continue
+                        
+                    if line.startswith('['):
+                        try:
+                            time_info = line[1:line.find(']')].split(' - ')
+                            start_time = float(time_info[0])
+                            end_time = float(time_info[1])
+                            
+                            rest = line[line.find(']')+1:].strip().split('\t')
+                            if len(rest) >= 3:
+                                turn_name = rest[0]
+                                emotion = rest[1]
+                                
+                                vad = [2.5, 2.5, 2.5]  # 默认值
+                                if len(rest) > 2:
+                                    try:
+                                        vad_str = rest[2].strip('[]')
+                                        vad = [float(x) for x in vad_str.split(',')]
+                                    except:
+                                        pass
+                                
+                                if emotion in ['ang', 'hap', 'neu', 'sad']:
+                                    segments.append({
+                                        'start_time': start_time,
+                                        'end_time': end_time,
+                                        'turn_name': turn_name,
+                                        'emotion': emotion,
+                                        'vad': vad
+                                    })
+                        except Exception as e:
+                            print(f"解析情感文件出错: {file_path}")
+                            print(f"错误行: {line}")
+                            print(f"错误信息: {str(e)}")
+                            
+        except Exception as e:
+            print(f"读取情感文件出错: {file_path}")
+            print(f"错误信息: {str(e)}")
             
-            for line in lines:
-                line = line.strip()
-                if line.startswith('['):
-                    # 解析时间段和情感标签
-                    time_info = line[1:line.find(']')].split(' - ')
-                    start_time = float(time_info[0])
-                    end_time = float(time_info[1])
-                    
-                    # 解析情感标签和VAD值
-                    parts = line[line.find(']')+1:].strip().split('\t')
-                    turn_name = parts[1]
-                    emotion = parts[2]
-                    vad = eval(parts[3])  # 解析VAD值
-                    
-                    # 只保留四种情绪
-                    if emotion in ['ang', 'hap', 'neu', 'sad']:
-                        current_segment = {
-                            'start_time': start_time,
-                            'end_time': end_time,
-                            'turn_name': turn_name,
-                            'emotion': emotion,
-                            'vad': vad
-                        }
-                        segments.append(current_segment)
-        
         return segments
     
-    def parse_transcript_file(self, transcript_file):
+    def parse_transcript_file(self, file_path):
         """解析转录文件，返回时间段对应的文本"""
         segments = {}
-        with open(transcript_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            current_turn = None
-            current_text = []
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    try:
+                        turn_name = line.split(' [')[0]
+                        text = line.split(': ')[1] if ': ' in line else ''
+                        segments[turn_name] = text
+                    except Exception as e:
+                        print(f"解析转录文件出错: {file_path}")
+                        print(f"错误行: {line}")
+                        print(f"错误信息: {str(e)}")
+                        
+        except Exception as e:
+            print(f"读取转录文件出错: {file_path}")
+            print(f"错误信息: {str(e)}")
             
-            for line in lines:
-                line = line.strip()
-                if line.startswith('['):
-                    # 保存之前的turn
-                    if current_turn is not None:
-                        segments[current_turn] = ' '.join(current_text)
-                        current_text = []
-                    
-                    # 解析新的turn
-                    time_info = line[1:line.find(']')].split(' - ')
-                    current_turn = line[line.find(']')+1:].strip().split('\t')[1]
-                elif line and current_turn is not None:
-                    # 添加文本内容
-                    current_text.append(line)
-            
-            # 保存最后一个turn
-            if current_turn is not None and current_text:
-                segments[current_turn] = ' '.join(current_text)
-        
         return segments
     
     def extract_audio_features(self, audio_path, start_time, end_time):
@@ -101,7 +161,7 @@ class IEMOCAPFeatureExtractor:
         segment = audio[start_sample:end_sample]
         
         # 准备输入
-        inputs = self.audio_tokenizer(segment, sampling_rate=sr, return_tensors="pt")
+        inputs = self.audio_processor(segment, sampling_rate=sr, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
         # 提取特征
@@ -131,42 +191,57 @@ class IEMOCAPFeatureExtractor:
     
     def extract_motion_features(self, motion_path, start_time, end_time):
         """提取指定时间段的头部动作特征"""
-        # 读取txt格式的头部动作数据
-        motion_data = pd.read_csv(motion_path, delim_whitespace=True, skiprows=1)
-        
-        # 根据时间筛选数据
-        mask = (motion_data['Time'] >= start_time) & (motion_data['Time'] <= end_time)
-        segment_data = motion_data[mask]
-        
-        # 提取旋转和平移特征
-        rotation_features = segment_data[['pitch', 'roll', 'yaw']].values
-        translation_features = segment_data[['tra_x', 'tra_y', 'tra_z']].values
-        
-        # 计算统计特征
-        features = {
-            'rotation_mean': np.mean(rotation_features, axis=0),
-            'rotation_std': np.std(rotation_features, axis=0),
-            'rotation_max': np.max(rotation_features, axis=0),
-            'rotation_min': np.min(rotation_features, axis=0),
-            'translation_mean': np.mean(translation_features, axis=0),
-            'translation_std': np.std(translation_features, axis=0),
-            'translation_max': np.max(translation_features, axis=0),
-            'translation_min': np.min(translation_features, axis=0)
-        }
-        
-        # 将所有特征合并成一个向量
-        feature_vector = np.concatenate([
-            features['rotation_mean'],
-            features['rotation_std'],
-            features['rotation_max'],
-            features['rotation_min'],
-            features['translation_mean'],
-            features['translation_std'],
-            features['translation_max'],
-            features['translation_min']
-        ])
-        
-        return feature_vector
+        try:
+            motion_data = []
+            with open(motion_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                for line in lines[2:]:  # 跳过前两行标题
+                    parts = line.strip().split()
+                    if len(parts) >= 7:
+                        time = float(parts[1])
+                        if start_time <= time <= end_time:
+                            motion_data.append([
+                                float(parts[2]),  # pitch
+                                float(parts[3]),  # roll
+                                float(parts[4]),  # yaw
+                                float(parts[5]),  # tra_x
+                                float(parts[6]),  # tra_y
+                                float(parts[7])   # tra_z
+                            ])
+            
+            if not motion_data:
+                return None
+                
+            motion_data = np.array(motion_data)
+            
+            features = {
+                'rotation_mean': np.mean(motion_data[:, :3], axis=0),
+                'rotation_std': np.std(motion_data[:, :3], axis=0),
+                'rotation_max': np.max(motion_data[:, :3], axis=0),
+                'rotation_min': np.min(motion_data[:, :3], axis=0),
+                'translation_mean': np.mean(motion_data[:, 3:], axis=0),
+                'translation_std': np.std(motion_data[:, 3:], axis=0),
+                'translation_max': np.max(motion_data[:, 3:], axis=0),
+                'translation_min': np.min(motion_data[:, 3:], axis=0)
+            }
+            
+            feature_vector = np.concatenate([
+                features['rotation_mean'],
+                features['rotation_std'],
+                features['rotation_max'],
+                features['rotation_min'],
+                features['translation_mean'],
+                features['translation_std'],
+                features['translation_max'],
+                features['translation_min']
+            ])
+            
+            return feature_vector
+            
+        except Exception as e:
+            print(f"提取动作特征出错: {motion_path}")
+            print(f"错误信息: {str(e)}")
+            return None
     
     def process_session(self, session_path):
         """处理单个会话的所有特征，只保留四种情绪的数据"""
@@ -178,59 +253,73 @@ class IEMOCAPFeatureExtractor:
             'vad': []
         }
         
-        # 获取dialog目录路径
-        dialog_path = os.path.join(session_path, 'dialog')
-        
-        # 获取所有对话文件（impro和script）
-        dialogue_files = []
-        for file in os.listdir(os.path.join(dialog_path, 'EmoEvaluation')):
-            if file.endswith('.txt'):
-                dialogue_files.append(file.replace('.txt', ''))
-        
-        # 处理每个对话文件
-        for dialogue in dialogue_files:
-            # 读取情感标注文件
-            emotion_file = os.path.join(dialog_path, 'EmoEvaluation', f"{dialogue}.txt")
-            if os.path.exists(emotion_file):
-                segments = self.parse_emotion_file(emotion_file)
-                
-                # 读取转录文件
-                transcript_file = os.path.join(dialog_path, 'transcriptions', f"{dialogue}.txt")
-                if os.path.exists(transcript_file):
-                    transcript_segments = self.parse_transcript_file(transcript_file)
-                
-                for segment in segments:
-                    # 只处理四种情绪的数据
-                    if segment['emotion'] in ['ang', 'hap', 'neu', 'sad']:
-                        # 提取音频特征
-                        audio_path = os.path.join(dialog_path, 'wav', f"{dialogue}.wav")
-                        if os.path.exists(audio_path):
-                            audio_features = self.extract_audio_features(
-                                audio_path, 
-                                segment['start_time'], 
-                                segment['end_time']
-                            )
-                            features['audio'].append(audio_features)
-                        
-                        # 提取文本特征
-                        if os.path.exists(transcript_file) and segment['turn_name'] in transcript_segments:
-                            text = transcript_segments[segment['turn_name']]
-                            text_features = self.extract_text_features(text)
-                            features['text'].append(text_features)
-                        
-                        # 提取头部动作特征
-                        motion_path = os.path.join(dialog_path, 'MOCAP_head', f"{dialogue}.txt")
-                        if os.path.exists(motion_path):
-                            motion_features = self.extract_motion_features(
-                                motion_path,
-                                segment['start_time'],
-                                segment['end_time']
-                            )
-                            features['motion'].append(motion_features)
-                        
-                        # 保存情感标签和VAD值
-                        features['emotion'].append(segment['emotion'])
-                        features['vad'].append(segment['vad'])
+        try:
+            dialog_path = os.path.join(session_path, 'dialog')
+            if not os.path.exists(dialog_path):
+                return features
+            
+            dialogue_files = []
+            emo_eval_path = os.path.join(dialog_path, 'EmoEvaluation')
+            if os.path.exists(emo_eval_path):
+                for file in os.listdir(emo_eval_path):
+                    if file.endswith('.txt'):
+                        dialogue_files.append(file.replace('.txt', ''))
+            
+            # 使用tqdm显示进度
+            for dialogue in tqdm(dialogue_files, desc="处理对话文件"):
+                emotion_file = os.path.join(dialog_path, 'EmoEvaluation', f"{dialogue}.txt")
+                if os.path.exists(emotion_file):
+                    segments = self.parse_emotion_file(emotion_file)
+                    
+                    transcript_file = os.path.join(dialog_path, 'transcriptions', f"{dialogue}.txt")
+                    if os.path.exists(transcript_file):
+                        transcript_segments = self.parse_transcript_file(transcript_file)
+                    else:
+                        continue
+                    
+                    for segment in segments:
+                        if segment['emotion'] in ['ang', 'hap', 'neu', 'sad']:
+                            # 提取音频特征
+                            audio_path = os.path.join(dialog_path, 'wav', f"{dialogue}.wav")
+                            if os.path.exists(audio_path):
+                                try:
+                                    audio_features = self.extract_audio_features(
+                                        audio_path, 
+                                        segment['start_time'], 
+                                        segment['end_time']
+                                    )
+                                    features['audio'].append(audio_features)
+                                except Exception as e:
+                                    print(f"提取音频特征出错: {audio_path}")
+                                    print(f"错误信息: {str(e)}")
+                            
+                            # 提取文本特征
+                            if segment['turn_name'] in transcript_segments:
+                                try:
+                                    text = transcript_segments[segment['turn_name']]
+                                    text_features = self.extract_text_features(text)
+                                    features['text'].append(text_features)
+                                except Exception as e:
+                                    print(f"提取文本特征出错: {segment['turn_name']}")
+                                    print(f"错误信息: {str(e)}")
+                            
+                            # 提取头部动作特征
+                            motion_path = os.path.join(dialog_path, 'MOCAP_head', f"{dialogue}.txt")
+                            if os.path.exists(motion_path):
+                                motion_features = self.extract_motion_features(
+                                    motion_path,
+                                    segment['start_time'],
+                                    segment['end_time']
+                                )
+                                if motion_features is not None:
+                                    features['motion'].append(motion_features)
+                            
+                            features['emotion'].append(segment['emotion'])
+                            features['vad'].append(segment['vad'])
+            
+        except Exception as e:
+            print(f"处理会话出错: {session_path}")
+            print(f"错误信息: {str(e)}")
         
         return features
 
@@ -239,23 +328,78 @@ def main():
     extractor = IEMOCAPFeatureExtractor()
     
     # IEMOCAP数据集根目录
-    dataset_root = "..\New folder1"
+    dataset_root = "data/IEMOCAP"
+    print(f"数据集根目录: {dataset_root}")
+    
+    # 检查数据集目录是否存在
+    if not os.path.exists(dataset_root):
+        print(f"错误: 数据集目录 {dataset_root} 不存在")
+        return
+    
+    # 列出数据集目录内容
+    print("\n数据集目录内容:")
+    for item in os.listdir(dataset_root):
+        print(f"- {item}")
+    
+    # 创建保存特征的目录
+    features_dir = "data/Feature/features"
+    os.makedirs(features_dir, exist_ok=True)
+    print(f"\n特征保存目录: {features_dir}")
     
     # 处理所有会话
     for session in tqdm(os.listdir(dataset_root)):
         session_path = os.path.join(dataset_root, session)
-        if os.path.isdir(session_path):
+        # 只处理Session开头的目录，跳过Documentation
+        if os.path.isdir(session_path) and session.startswith('Session'):
+            print(f"\n处理会话: {session}")
+            print(f"会话路径: {session_path}")
+            
+            # 检查会话目录结构
+            print("\n会话目录结构:")
+            for root, dirs, files in os.walk(session_path):
+                level = root.replace(session_path, '').count(os.sep)
+                indent = ' ' * 4 * level
+                print(f"{indent}{os.path.basename(root)}/")
+                subindent = ' ' * 4 * (level + 1)
+                for f in files:
+                    print(f"{subindent}{f}")
+            
             features = extractor.process_session(session_path)
             
             # 保存特征
-            save_path = os.path.join("features", session)
+            save_path = os.path.join(features_dir, session)
             os.makedirs(save_path, exist_ok=True)
             
-            np.save(os.path.join(save_path, 'audio_features.npy'), np.array(features['audio']))
-            np.save(os.path.join(save_path, 'text_features.npy'), np.array(features['text']))
-            np.save(os.path.join(save_path, 'motion_features.npy'), np.array(features['motion']))
-            np.save(os.path.join(save_path, 'emotion_labels.npy'), np.array(features['emotion']))
-            np.save(os.path.join(save_path, 'vad_values.npy'), np.array(features['vad']))
+            # 只保存非空特征
+            if features['audio']:
+                np.save(os.path.join(save_path, 'audio_features.npy'), np.array(features['audio']))
+                print(f"保存音频特征: {len(features['audio'])} 个样本")
+            else:
+                print("警告: 没有音频特征可保存")
+                
+            if features['text']:
+                np.save(os.path.join(save_path, 'text_features.npy'), np.array(features['text']))
+                print(f"保存文本特征: {len(features['text'])} 个样本")
+            else:
+                print("警告: 没有文本特征可保存")
+                
+            if features['motion']:
+                np.save(os.path.join(save_path, 'motion_features.npy'), np.array(features['motion']))
+                print(f"保存动作特征: {len(features['motion'])} 个样本")
+            else:
+                print("警告: 没有动作特征可保存")
+                
+            if features['emotion']:
+                np.save(os.path.join(save_path, 'emotion_labels.npy'), np.array(features['emotion']))
+                print(f"保存情感标签: {len(features['emotion'])} 个样本")
+            else:
+                print("警告: 没有情感标签可保存")
+                
+            if features['vad']:
+                np.save(os.path.join(save_path, 'vad_values.npy'), np.array(features['vad']))
+                print(f"保存VAD值: {len(features['vad'])} 个样本")
+            else:
+                print("警告: 没有VAD值可保存")
 
 if __name__ == "__main__":
     main()
