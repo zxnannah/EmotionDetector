@@ -7,7 +7,7 @@ import os
 
 class SharedMLP(nn.Module):
     """共享的多模态投影层"""
-    def __init__(self, input_dim=768, hidden_dim=1024, output_dim=512):
+    def __init__(self, input_dim, hidden_dim=1024, output_dim=512):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -56,7 +56,7 @@ class SharedAutoencoder(nn.Module):
         
         # 模态特定输出头
         self.audio_head = nn.Linear(512, 768)  # 音频特征重建
-        self.text_head = nn.Linear(512, 768)   # 文本特征重建
+        self.text_head = nn.Linear(512, 1536)   # 文本特征重建
         self.motion_head = nn.Linear(512, 24)  # 头部动作特征重建
         
     def forward(self, x, modality):
@@ -74,7 +74,7 @@ class SharedAutoencoder(nn.Module):
 
 class AudioEncoder(nn.Module):
     """音频特征编码器"""
-    def __init__(self, input_dim=768, hidden_dim=256):
+    def __init__(self, input_dim=512, hidden_dim=256):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -88,7 +88,7 @@ class AudioEncoder(nn.Module):
 
 class TextEncoder(nn.Module):
     """文本特征编码器"""
-    def __init__(self, input_dim=768, hidden_dim=256):
+    def __init__(self, input_dim=512, hidden_dim=256):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -102,7 +102,7 @@ class TextEncoder(nn.Module):
 
 class MotionEncoder(nn.Module):
     """动作特征编码器"""
-    def __init__(self, input_dim=24, hidden_dim=256):
+    def __init__(self, input_dim=512, hidden_dim=256):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -117,9 +117,9 @@ class MotionEncoder(nn.Module):
 class EmotionClassifier(nn.Module):
     def __init__(self, hidden_dim=256, num_classes=4):
         super(EmotionClassifier, self).__init__()
-        self.audio_encoder = AudioEncoder()
-        self.text_encoder = TextEncoder()
-        self.motion_encoder = MotionEncoder()
+        self.audio_encoder = AudioEncoder(input_dim=512)
+        self.text_encoder = TextEncoder(input_dim=512)
+        self.motion_encoder = MotionEncoder(input_dim=512)
         
         # 多模态融合
         self.fusion = nn.Sequential(
@@ -190,7 +190,10 @@ class EmotionPerceptionModel(nn.Module):
         super().__init__()
         
         # 共享组件
-        self.shared_mlp = SharedMLP()
+        self.audio_proj = SharedMLP(input_dim=768)  # 音频输入768维
+        self.text_proj = SharedMLP(input_dim=1536)  # 文本输入1536维
+        self.motion_proj = SharedMLP(input_dim=24)  # 动作输入24维
+
         self.mim_module = VariationalMIM()
         self.autoencoder = SharedAutoencoder()
         
@@ -206,13 +209,13 @@ class EmotionPerceptionModel(nn.Module):
         )
     
     def encode_audio(self, audio_input):
-        return self.shared_mlp(audio_input)
+        return self.audio_proj(audio_input)
     
     def encode_text(self, text_input):
-        return self.shared_mlp(text_input)
+        return self.text_proj(text_input)
     
     def encode_motion(self, motion_input):
-        return self.shared_mlp(motion_input)
+        return self.motion_proj(motion_input)
     
     def forward(self, batch):
         """完整前向传播
@@ -292,12 +295,13 @@ class EmotionPerceptionModel(nn.Module):
 if __name__ == '__main__':
     model = EmotionPerceptionModel()
     
+    # 模拟输入
     batch = {
-        'audio': torch.randn(2, 768),
-        'text': torch.randn(2, 768),
-        'motion': torch.randn(2, 24)
+        'audio': torch.randn(32, 768),
+        'text': torch.randn(32, 1536),  # 匹配修改后的输入
+        'motion': torch.randn(32, 24)
     }
-    
+
     outputs = model(batch)
     print(f"Total loss: {outputs['total_loss']:.4f}")
     print(f"Reconstructed audio shape: {outputs['recon_audio'].shape}")
