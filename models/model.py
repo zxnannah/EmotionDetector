@@ -12,14 +12,17 @@ class SharedMLP(nn.Module):
     def __init__(self, input_dim, hidden_dim=1024, output_dim=512):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Conv1d(input_dim,hidden_dim,kernel_size=1),
             nn.GELU(),
             nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, output_dim)
+            nn.Conv1d(hidden_dim, output_dim, kernel_size=1)
         )
 
     def forward(self, x):
-        return self.mlp(x)
+        x = x.permute(0, 2, 1)
+        x = self.mlp(x)
+        x = x.permute(0, 2, 1)  
+        return x
 
 
 class VariationalMIM(nn.Module):
@@ -35,6 +38,7 @@ class VariationalMIM(nn.Module):
 
     def forward(self, x, y):
         # 计算变分下界
+        batch_size, seq_len, _ = x.shape
         pos = self.T(torch.cat([x, y], dim=-1))
         perm = torch.randperm(y.size(0))
         neg = self.T(torch.cat([x, y[perm]], dim=-1))
@@ -291,6 +295,12 @@ class EmotionPerceptionModel(nn.Module):
         text_feat = self.encode_text(batch['text'])
         motion_feat = self.encode_motion(batch['motion'])
 
+        print(f"音频特征维度: {audio_feat.shape}")  # 应为 (batch_size, 512)
+        print(f"文本特征维度: {text_feat.shape}")   # 应为 (batch_size, 512)
+        print(f"动作特征维度: {motion_feat.shape}") # 应为 (batch_size, 512)
+
+        
+
         outputs['audio_features'] = audio_feat
         outputs['text_features'] = text_feat
         outputs['motion_features'] = motion_feat
@@ -360,8 +370,17 @@ if __name__ == '__main__':
         'text': torch.randn(32, 1536),  # 匹配修改后的输入
         'motion': torch.randn(32, 24)
     }
+# if __name__ == '__main__':
+#     model = EmotionPerceptionModel()
+    
+#     # 模拟输入
+#     batch = {
+#         'audio': torch.randn(32, 768),
+#         'text': torch.randn(32, 1536),  # 匹配修改后的输入
+#         'motion': torch.randn(32, 24)
+#     }
 
-    outputs = model(batch)
-    print(f"Total loss: {outputs['total_loss']:.4f}")
-    print(f"Reconstructed audio shape: {outputs['recon_audio'].shape}")
-    print(f"Reconstructed text logits shape: {outputs['recon_text'].shape}")
+#     outputs = model(batch)
+#     print(f"Total loss: {outputs['total_loss']:.4f}")
+#     print(f"Reconstructed audio shape: {outputs['recon_audio'].shape}")
+#     print(f"Reconstructed text logits shape: {outputs['recon_text'].shape}")

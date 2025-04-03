@@ -173,7 +173,7 @@ class IEMOCAPFeatureExtractor:
                 lines = f.readlines()
                 for line in lines[2:]:  # 跳过前两行标题
                     parts = line.strip().split()
-                    if len(parts) >= 7:
+                    if len(parts) >= 8:
                         time = float(parts[1])
                         if start_time <= time <= end_time:
                             motion_data.append([
@@ -188,31 +188,18 @@ class IEMOCAPFeatureExtractor:
             if not motion_data:
                 return None
                 
-            motion_data = np.array(motion_data)
-            
-            features = {
-                'rotation_mean': np.mean(motion_data[:, :3], axis=0),
-                'rotation_std': np.std(motion_data[:, :3], axis=0),
-                'rotation_max': np.max(motion_data[:, :3], axis=0),
-                'rotation_min': np.min(motion_data[:, :3], axis=0),
-                'translation_mean': np.mean(motion_data[:, 3:], axis=0),
-                'translation_std': np.std(motion_data[:, 3:], axis=0),
-                'translation_max': np.max(motion_data[:, 3:], axis=0),
-                'translation_min': np.min(motion_data[:, 3:], axis=0)
-            }
-            
-            feature_vector = np.concatenate([
-                features['rotation_mean'],
-                features['rotation_std'],
-                features['rotation_max'],
-                features['rotation_min'],
-                features['translation_mean'],
-                features['translation_std'],
-                features['translation_max'],
-                features['translation_min']
-            ])
-            
-            return feature_vector
+            motion_data = np.array(motion_data).reshape(1,-1,6)
+
+            target_seq_len = 10
+            current_seq_len = motion_data.shape[1]
+
+            if current_seq_len>target_seq_len:
+                motion_data = motion_data[:,:target_seq_len,:]
+            elif current_seq_len<target_seq_len:
+                pad_width=target_seq_len-current_seq_len
+                motion_data = np.pad(motion_data, ((0,0),(0,pad_width),(0,0)), 'constant', constant_values=0)
+
+            return motion_data
             
         except Exception as e:
             print(f"提取动作特征出错: {motion_path}")
