@@ -188,17 +188,18 @@ class IEMOCAPFeatureExtractor:
             if not motion_data:
                 return None
                 
-            motion_data = np.array(motion_data).reshape(1,-1,6)
+            motion_data = np.array(motion_data)
 
             target_seq_len = 10
-            current_seq_len = motion_data.shape[1]
+            current_seq_len = motion_data.shape[0]
 
             if current_seq_len>target_seq_len:
-                motion_data = motion_data[:,:target_seq_len,:]
+                motion_data = motion_data[:target_seq_len,:]
             elif current_seq_len<target_seq_len:
                 pad_width=target_seq_len-current_seq_len
-                motion_data = np.pad(motion_data, ((0,0),(0,pad_width),(0,0)), 'constant', constant_values=0)
+                motion_data = np.pad(motion_data, ((0,pad_width),(0,0)), 'constant', constant_values=0)
 
+            motion_data = motion_data.reshape(1, target_seq_len, 6)
             return motion_data
             
         except Exception as e:
@@ -327,7 +328,8 @@ def main():
                 print("警告: 没有文本特征可保存")
                 
             if features['motion']:
-                np.save(os.path.join(save_path, 'motion_features.npy'), np.array(features['motion']))
+                motion_array = np.concatenate(features['motion'], axis=0)  # axis=0 沿批次维度合并
+                np.save(os.path.join(save_path, 'motion_features.npy'), motion_array)
                 print(f"保存动作特征: {len(features['motion'])} 个样本")
             else:
                 print("警告: 没有动作特征可保存")
