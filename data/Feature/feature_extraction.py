@@ -190,7 +190,7 @@ class IEMOCAPFeatureExtractor:
                 
             motion_data = np.array(motion_data)
 
-            target_seq_len = 10
+            target_seq_len = 1
             current_seq_len = motion_data.shape[0]
 
             if current_seq_len>target_seq_len:
