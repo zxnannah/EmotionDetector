@@ -170,7 +170,7 @@ class EmotionClassifier(nn.Module):
         combined = torch.cat([audio_encoded, text_encoded, motion_encoded], dim=2)
         fused = self.fusion(combined)
 
-        fused_pooled = fused.mean(fused,dim=1)  # 全局池化        
+        fused_pooled = fused.mean(dim=1)  # 全局池化        
 
         emotion_logits = self.classifier(fused_pooled)
         vad_values = self.vad_predictor(fused_pooled)
@@ -302,9 +302,6 @@ class EmotionPerceptionModel(nn.Module):
         text_feat = self.encode_text(batch['text'])
         motion_feat = self.encode_motion(batch['motion'])
 
-        print(f"音频特征维度: {audio_feat.shape}")  # 应为 (batch_size, 512)
-        print(f"文本特征维度: {text_feat.shape}")   # 应为 (batch_size, 512)
-        print(f"动作特征维度: {motion_feat.shape}") # 应为 (batch_size, 512)
 
         
 
