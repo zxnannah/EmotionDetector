@@ -208,6 +208,39 @@ class EmotionDataset(torch.utils.data.Dataset):
             'emotion': emotion_indices,
             'vad': vad_values
         }
+    
+class CLIPLoss(torch.nn.Module):
+    def __init__(self, temperature=0.07):
+        super(CLIPLoss, self).__init__()
+        self.temperature = temperature
+
+    def forward(self, features1, features2):
+        """
+        features1: (N, L, D)
+        features2: (N, L, D)
+        return: scalar loss
+        """
+
+        features1 = F.normalize(features1, dim=1).reshape(features1.size(0), -1)  # (N, D)
+        features2 = F.normalize(features2, dim=1).reshape(features2.size(0), -1)  # (N, D)
+
+        # print(features1.shape, features2.shape)
+        # print("*"*10)
+        logits_per1 = features1 @ features2.T  # (N, N)
+        logits_per2 = features2 @ features1.T   # (N, N)
+
+        # 对角矩阵
+        batch_size = features1.size(0)
+        labels = torch.arange(batch_size, device=features1.device)
+
+        logits_per1 /= self.temperature
+        logits_per1 /= self.temperature
+
+        # Cross-entropy loss
+        loss1 = F.cross_entropy(logits_per1, labels)
+        loss2 = F.cross_entropy(logits_per2, labels)
+
+        return (loss1 + loss2) / 2
 
 
 class EmotionPerceptionModel(nn.Module):
@@ -223,6 +256,8 @@ class EmotionPerceptionModel(nn.Module):
 
         self.mim_module = VariationalMIM()
         self.autoencoder = SharedAutoencoder()
+
+        self.infoNCE = CLIPLoss()
 
         # 改进的多模态融合 - 添加注意力机制
         self.modal_attention = nn.Sequential(
@@ -315,6 +350,11 @@ class EmotionPerceptionModel(nn.Module):
         mim_loss += self.mim_module(audio_feat, motion_feat)
         mim_loss += self.mim_module(text_feat, motion_feat)
         outputs['mim_loss'] = mim_loss / 3  # 平均跨模态损失
+        infoNCE_loss = 0
+        infoNCE_loss += self.infoNCE(audio_feat, text_feat)
+        infoNCE_loss += self.infoNCE(audio_feat, motion_feat)
+        infoNCE_loss += self.infoNCE(text_feat, motion_feat)
+        outputs['infoNCE_loss'] = infoNCE_loss / 3  # 平均跨模态损失
 
         # 自编码器重建
         recon_loss = 0
@@ -352,8 +392,10 @@ class EmotionPerceptionModel(nn.Module):
 
         # 总损失
         total_loss = (
-                0.3 * outputs['mim_loss'] +
-                0.3 * outputs['recon_loss'] +
+                # 系数待定
+                0.2 * outputs['mim_loss'] +
+                0.2 * outputs['infoNCE_loss'] +
+                0.2 * outputs['recon_loss'] +
                 0.2 * outputs.get('emotion_loss', 0) +
                 0.2 * outputs.get('vad_loss', 0)
         )

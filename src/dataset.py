@@ -29,11 +29,18 @@ class EmotionDataset(torch.utils.data.Dataset):
         self.motion_features = torch.cat(motion_features,dim=0)
         self.emotion_labels = torch.cat(emotion_labels,dim=0)
         self.vad_values = torch.cat(vad_values,dim=0)
+
+        # print(f"audio_features shape: {self.audio_features.shape}")
+        # print(f"text_features shape: {self.text_features.shape}")
+        # print(f"motion_features shape: {self.motion_features.shape}")
+        # print(f"emotion_labels shape: {self.emotion_labels.shape}")
+        # print(f"vad_values shape: {self.vad_values.shape}")
         
 
 
     def __len__(self):
-        return len(self.sessions)
+        return min(self.audio_features.shape[0], self.text_features.shape[0], 
+                   self.motion_features.shape[0], self.emotion_labels.shape[0], self.vad_values.shape[0])
 
     def __getitem__(self, idx):
         return {
