@@ -6,6 +6,9 @@ from torch.utils.data import Dataset, DataLoader
 import librosa
 import pandas as pd
 from tqdm import tqdm
+import cv2
+import tensorflow as tf
+import tensorflow_hub as hub
 
 
 pretrained_dir = "../../pretrained_models"
@@ -49,6 +52,8 @@ class IEMOCAPFeatureExtractor:
             
         self.text_model = BertModel.from_pretrained(bert_dir, local_files_only=True)
         self.text_tokenizer = BertTokenizer.from_pretrained(bert_dir, local_files_only=True)
+
+        self.vision_model = hub.load("./pretrained_models/mmv-tensorflow1-s3d-v1")
 
         if not os.path.exists(os.path.join(bert_dir, 'pytorch_model.bin')):
             raise FileNotFoundError("BERT模型权重文件未找到")
@@ -207,12 +212,68 @@ class IEMOCAPFeatureExtractor:
             print(f"错误信息: {str(e)}")
             return None
     
+    def extract_video_features(self, video_path, start_time, end_time):
+        """提取指定时间段的视频特征"""
+        try:
+            target_frames = 32
+            frame_size = 224
+
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            start_frame = int(start_time * fps)
+            end_frame = int(end_time * fps)
+
+            # 时间维度采样策略（等间隔采样）
+            frame_indices = np.linspace(start_frame, end_frame-1, target_frames, dtype=np.int32)
+
+            frames = []
+            for frame_num in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if not ret:
+                    frames.append(np.zeros((frame_size,frame_size,3),dtype=np.uint8))
+                    break
+                
+                frame = cv2.resize(frame, (frame_size, frame_size))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(frame)
+            
+            cap.release()
+
+            if not frames:
+                return None
+
+            # 转换为模型输入格式 [B,T,H,W,C]，保证T>=10，要不然会tf报错
+            frames = np.array(frames)  # [T,H,W,C]
+            inputs = torch.from_numpy(frames).float() / 255.0
+            T = inputs.shape[0]
+            if T<32:
+                pad_num = 32 -T
+                # 如果少于32，则复制最后一帧
+                last_frame = inputs[-1].unsqueeze(0).repeat(pad_num,1,1,1)
+                inputs = torch.cat([inputs,last_frame],dim=0)
+
+            inputs = inputs.unsqueeze(0)  # [B,T,H,W,C] B=1
+            
+            # if T<target_frames:
+            #     print(f"input:{inputs.shape}")
+            output = self.vision_model.signatures['video'](tf.constant(tf.cast(inputs.numpy(),dtype=tf.float32)))
+            output = np.array(output['before_head'])
+            # video_data = video_data.reshape(1, 1, -1)  # 展平视频数据
+            
+            return output
+        
+        except Exception as e:
+            print(f"提取视频特征出错: {video_path}")
+            print(f"错误信息: {str(e)}")
+            return None
+    
     def process_session(self, session_path):
         """处理单个会话的所有特征，只保留四种情绪的数据"""
         features = {
             'audio': [],
             'text': [],
-            'motion': [],
+            'video': [],
             'emotion': [],
             'vad': []
         }
@@ -266,16 +327,16 @@ class IEMOCAPFeatureExtractor:
                                     print(f"提取文本特征出错: {segment['turn_name']}")
                                     print(f"错误信息: {str(e)}")
                             
-                            # 提取头部动作特征
-                            motion_path = os.path.join(dialog_path, 'MOCAP_head', f"{dialogue}.txt")
-                            if os.path.exists(motion_path):
-                                motion_features = self.extract_motion_features(
-                                    motion_path,
-                                    segment['start_time'],
+                            # 提取视频特征
+                            video_path = os.path.join(dialog_path, 'avi', 'DivX', f"{dialogue}.avi")
+                            if os.path.exists(video_path):
+                                video_features = self.extract_video_features(
+                                    video_path,
+                                    segment['start_time'], 
                                     segment['end_time']
                                 )
-                                if motion_features is not None:
-                                    features['motion'].append(motion_features)
+                                if video_features is not None:
+                                    features['video'].append(video_features)
                             
                             features['emotion'].append(segment['emotion'])
                             features['vad'].append(segment['vad'])
@@ -327,12 +388,12 @@ def main():
             else:
                 print("警告: 没有文本特征可保存")
                 
-            if features['motion']:
-                motion_array = np.concatenate(features['motion'], axis=0)  # axis=0 沿批次维度合并
-                np.save(os.path.join(save_path, 'motion_features.npy'), motion_array)
-                print(f"保存动作特征: {len(features['motion'])} 个样本")
+            if features['video']:
+                # video_array = np.concatenate(features['video'], axis=0)  # axis=0 沿批次维度合并
+                np.save(os.path.join(save_path, 'video_features.npy'), np.array(features['video']))
+                print(f"保存视频特征: {len(features['video'])} 个样本")
             else:
-                print("警告: 没有动作特征可保存")
+                print("警告: 没有视频特征可保存")
                 
             if features['emotion']:
                 np.save(os.path.join(save_path, 'emotion_labels.npy'), np.array(features['emotion']))
