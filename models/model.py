@@ -221,8 +221,8 @@ class CLIPLoss(torch.nn.Module):
         return: scalar loss
         """
 
-        features1 = F.normalize(features1, dim=1).reshape(features1.size(0), -1)  # (N, D)
-        features2 = F.normalize(features2, dim=1).reshape(features2.size(0), -1)  # (N, D)
+        features1 = F.normalize(features1, dim=2).reshape(features1.size(0), -1)  # (N, D)
+        features2 = F.normalize(features2, dim=2).reshape(features2.size(0), -1)  # (N, D)
 
         # print(features1.shape, features2.shape)
         # print("*"*10)

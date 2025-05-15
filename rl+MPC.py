@@ -299,9 +299,11 @@ class TemporalConsistencyAttention(nn.Module):
                         i, j  # 模态索引
                     )  # [B, C, C]
 
+                    # 偏置不会改变，一直都为0
                     # 添加模态偏置
                     attn = attn + self.modal_bias[i, j]
 
+                    # gamma不会改变，一直都是[1/3]*3
                     # 调整注意力强度
                     gamma = torch.sigmoid(self.gamma[i, j])
 
@@ -423,17 +425,18 @@ class RLPolicy(nn.Module):
             combined = current_states[i] + 0.5 * future_encoded[i]  # [B, D]
             combined_features.append(combined)
 
-            # 构建历史序列特征
-            history_sequences = []
-            for i, modality in enumerate(['text', 'audio', 'video']):
-                if len(self.history_states[modality]) > 0:
-                    # 将历史状态转换为张量
-                    seq = torch.stack(list(self.history_states[modality])).unsqueeze(0)
-                    # 复制到batch size
-                    seq = seq.repeat(batch_size, 1, 1)  # [B, T, D]
-                    history_sequences.append(seq)
-                else:
-                    history_sequences.append(None)
+        # 构建历史序列特征
+        history_sequences = []
+        for i, modality in enumerate(['text', 'audio', 'video']):
+            if len(self.history_states[modality]) > 0:
+                # 将历史状态转换为张量
+                seq = torch.stack(list(self.history_states[modality])).permute(1, 0, 2)  # [B, T, D]
+                # print(f"seq.shape: {seq.shape}")
+                # 复制到batch size
+                seq = seq.repeat(batch_size, 1, 1)  # [B, T, D]
+                history_sequences.append(seq)
+            else:
+                history_sequences.append(None)
 
 
         # 使用跨模态通道注意力融合特征
@@ -459,6 +462,8 @@ class MultimodalSystem:
 
         # 情绪平滑系数
         self.emotion_smoothing = 0.8
+
+        self.uncertainty_weight = 0.5  # 不确定性权重
 
         # 存储上一时刻的情绪预测结果
         self.prev_emotion = None
@@ -490,7 +495,8 @@ class MultimodalSystem:
         kl_losses = []
 
         hist = torch.stack(list(self.history[modality]))
-        hist = hist.unsqueeze(1)
+        # hist = hist.unsqueeze(1)
+        # print(hist.shape)
 
         for _ in range(self.pred_horizon):
             next_state, uncertainty, mu, logvar = self.mpc(hist)
@@ -511,7 +517,7 @@ class MultimodalSystem:
         # 考虑预测不确定性
         if uncertainty is not None:
             # 降低高不确定性预测的奖励
-            certainty_factor = 1.0 - self.uncertainty_weight * uncertainty
+            certainty_factor = 1.0 - self.uncertainty_weight * uncertainty   # 原先这里没有定义self.uncertainty_weight
             # 综合奖励
             return (acc + self.gamma * consistency) * certainty_factor - self.lambda_penalty * weight_change
         else:
@@ -534,7 +540,7 @@ class MultimodalSystem:
 
         # 汇总不确定性用于奖励计算
         mean_uncertainty = torch.mean(torch.cat([
-            future_preds[k]['uncertainties'].mean() for k in ['text', 'audio', 'video']
+            future_preds[k]['uncertainties'].mean().clone().detach().reshape(1) for k in range(0,3)
         ]))
 
         # RL策略生成权重
@@ -565,7 +571,15 @@ class MultimodalSystem:
         self.prev_emotion = weights.clone().detach()
 
         # 模态融合
-        fused = sum(w * feats_dict[k] for w, k in zip(weights, ['text', 'audio', 'video']))
+        # fused = sum(w.item() * feats_dict[k] for w, k in zip(weights, ['text', 'audio', 'video']))
+        fused = []
+        for b,weight in enumerate(weights):
+            fus = torch.zeros_like(feats_dict['text'][b])
+            for i,k in enumerate(['text', 'audio', 'video']):
+                fus += weight[i] * feats_dict[k][b]
+            fused.append(fus)
+
+        fused = torch.stack(fused)  # [B, D]
 
         # 分类和训练
         logits = self.task_model(fused)
@@ -584,7 +598,7 @@ class MultimodalSystem:
 
             reward = self._calc_reward(acc, consistency, weight_change, mean_uncertainty)
             # VAE损失(KL散度)
-            vae_loss = sum(future_preds[k]['kl_loss'] for k in ['text', 'audio', 'video'])
+            vae_loss = sum(future_preds[k]['kl_loss'] for k in range(0,3))
 
             # 总损失
             loss = -reward + F.cross_entropy(logits, target) + 0.01 * vae_loss
